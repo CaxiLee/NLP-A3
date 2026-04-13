@@ -11,6 +11,7 @@
 
 
 import glob
+import json
 import os
 
 import tiktoken
@@ -29,12 +30,56 @@ def read_text_file(file_path):
     return text_data
 
 
+def read_wiki_zh_json_dir(data_path):
+    """
+    Read CLUE wiki_zh style corpus: each file named wiki_* contains one JSON object per line
+    with keys title/text. Same layout as extract_wikizh.py output semantics.
+    """
+    wiki_files = []
+    for dirpath, _dirnames, filenames in os.walk(data_path):
+        for name in sorted(filenames):
+            if name.startswith("wiki_"):
+                wiki_files.append(os.path.join(dirpath, name))
+    wiki_files.sort()
+    if not wiki_files:
+        raise ValueError(f"No wiki_* JSON line files under: {data_path}")
+
+    print(f"Reading {len(wiki_files)} wiki_zh JSON line files from: {data_path}")
+    sep = "\n\n<|endoftext|>\n\n"
+    blocks = []
+    n_articles = 0
+    n_lines_bad = 0
+    for fi, file_path in enumerate(wiki_files, 1):
+        if fi == 1 or fi % 200 == 0 or fi == len(wiki_files):
+            print(f"  wiki files {fi}/{len(wiki_files)}")
+        with open(file_path, "r", encoding="utf-8", errors="replace") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    obj = json.loads(line)
+                except json.JSONDecodeError:
+                    n_lines_bad += 1
+                    continue
+                title = obj.get("title") or ""
+                text = obj.get("text") or ""
+                block = f"{title}\n{text}"
+                if n_articles > 0:
+                    blocks.append(sep)
+                blocks.append(block)
+                n_articles += 1
+    print(f"Loaded {n_articles} articles ({n_lines_bad} bad JSON lines).")
+    return "".join(blocks)
+
+
 def read_data_from_path(data_path):
     """
     Read data from a file or directory.
     
     If data_path is a file, read it directly.
     If data_path is a directory, recursively read all .txt files and concatenate.
+    If no .txt files are found, try wiki_zh JSON line files (wiki_*) like CLUECorpus2020.
     
     Args:
         data_path: Path to a file or directory containing text files
@@ -46,27 +91,22 @@ def read_data_from_path(data_path):
         print(f"Reading single file: {data_path}")
         return read_text_file(data_path)
     elif os.path.isdir(data_path):
-        print(f"Reading all .txt files from directory: {data_path}")
-        # Find all .txt files recursively
+        print(f"Scanning directory: {data_path}")
         pattern = os.path.join(data_path, "**/*.txt")
         txt_files = glob.glob(pattern, recursive=True)
         txt_files.sort()
-        
-        if not txt_files:
-            raise ValueError(f"No .txt files found in directory: {data_path}")
-        
-        print(f"Found {len(txt_files)} text files")
-        
-        # Read and concatenate all files
-        all_texts = []
-        for i, file_path in enumerate(txt_files, 1):
-            print(f"  Reading file {i}/{len(txt_files)}: {file_path}")
-            text = read_text_file(file_path)
-            all_texts.append(text)
-            # Add separator between files
-            all_texts.append(" <|endoftext|> ")
-        
-        return "".join(all_texts)
+
+        if txt_files:
+            print(f"Found {len(txt_files)} .txt files")
+            all_texts = []
+            for i, file_path in enumerate(txt_files, 1):
+                print(f"  Reading file {i}/{len(txt_files)}: {file_path}")
+                text = read_text_file(file_path)
+                all_texts.append(text)
+                all_texts.append(" <|endoftext|> ")
+            return "".join(all_texts)
+
+        return read_wiki_zh_json_dir(data_path)
     else:
         raise ValueError(f"Path does not exist or is not a file/directory: {data_path}")
 

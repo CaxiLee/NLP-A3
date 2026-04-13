@@ -87,6 +87,8 @@ def train_model_simple(
     stride=None,
     max_chars=None,
     warmup_steps=2000,
+    max_train_tokens=None,
+    num_workers=0,
 ):
     """
     Simple training loop for GPT model.
@@ -132,7 +134,7 @@ def train_model_simple(
         batch_size=batch_size,
         max_length=max_length,
         stride=stride,
-        num_workers=0,
+        num_workers=num_workers,
     )
 
     if len(train_loader) == 0:
@@ -145,13 +147,22 @@ def train_model_simple(
     warmup_steps_eff = min(warmup_steps, total_steps)
     base_lr = optimizer.param_groups[0]["lr"]
 
+    tokens_per_step = batch_size * max_length
+    approx_tokens_per_epoch = len(train_loader) * tokens_per_step
     vocab_size = tokenizer.get_vocab_size()
     print(
         f"Train batches/epoch: {len(train_loader)}, val batches: {len(val_loader)}, "
         f"vocab_size={vocab_size}, context_length={max_length}, "
         f"chars={len(text_data):,}, stride={stride}"
     )
+    print(
+        f"Approx. train tokens per epoch (upper bound): {approx_tokens_per_epoch:,} "
+        f"(~{tokens_per_step:,} tokens/step)"
+    )
+    if max_train_tokens is not None:
+        print(f"Will stop after about {max_train_tokens:,} training tokens seen.")
 
+    stop_training = False
     try:
         for epoch in range(n_epochs):
             model.train()
@@ -177,6 +188,9 @@ def train_model_simple(
 
                 tokens_seen += int(input_batch.numel())
 
+                if max_train_tokens is not None and tokens_seen >= max_train_tokens:
+                    stop_training = True
+
                 if global_step % eval_freq == 0:
                     train_loss, val_loss = evaluate_model(
                         model, train_loader, val_loader, device, eval_iter
@@ -198,6 +212,28 @@ def train_model_simple(
                     torch.save(model.state_dict(), ckpt_path)
                     print(f"Saved checkpoint: {ckpt_path}")
 
+                if stop_training:
+                    if global_step % eval_freq != 0:
+                        train_loss, val_loss = evaluate_model(
+                            model, train_loader, val_loader, device, eval_iter
+                        )
+                        train_losses.append(train_loss)
+                        val_losses.append(val_loss)
+                        track_tokens_seen.append(tokens_seen)
+                        track_steps.append(global_step)
+                        elapsed = time.time() - start_time
+                        h, m, s = convert_time(elapsed)
+                        print(
+                            f"step {global_step} | epoch {epoch + 1}/{n_epochs} | "
+                            f"train_loss {train_loss:.4f} | val_loss {val_loss:.4f} | "
+                            f"tokens {tokens_seen:,} | time {h}h{m}m{s}s "
+                            f"(final eval at token budget)"
+                        )
+                    break
+
+            if stop_training:
+                break
+
     except KeyboardInterrupt:
         ckpt_path = output_dir / "checkpoint_interrupted.pth"
         torch.save(model.state_dict(), ckpt_path)
@@ -207,6 +243,12 @@ def train_model_simple(
     final_path = output_dir / "model.pth"
     torch.save(model.state_dict(), final_path)
     print(f"Saved final weights: {final_path}")
+
+    if max_train_tokens is not None and tokens_seen < max_train_tokens:
+        print(
+            f"Note: stopped at {tokens_seen:,} tokens (< {max_train_tokens:,}). "
+            "Increase --n_epochs or data size to reach the token budget."
+        )
 
     return train_losses, val_losses, track_tokens_seen, track_steps
 
@@ -285,6 +327,25 @@ if __name__ == "__main__":
         default=None,
         help="Sliding-window stride; default is context_length // 2.",
     )
+    parser.add_argument(
+        "--max_train_tokens",
+        type=int,
+        default=100_000_000,
+        help="Stop after this many training tokens (set to 0 to disable). "
+        "Instructor expectation: val loss < 5 after ~100M tokens.",
+    )
+    parser.add_argument(
+        "--eval_iter",
+        type=int,
+        default=20,
+        help="Number of batches to average for train/val loss during evaluation.",
+    )
+    parser.add_argument(
+        "--num_workers",
+        type=int,
+        default=0,
+        help="DataLoader worker processes (0 is safest on Windows).",
+    )
 
     args = parser.parse_args()
 
@@ -324,6 +385,8 @@ if __name__ == "__main__":
     # Setup device
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
+    if torch.cuda.is_available():
+        torch.backends.cudnn.benchmark = True
     
     # Initialize model
     torch.manual_seed(123)
@@ -345,13 +408,16 @@ if __name__ == "__main__":
     # Train model
     print("\nStarting training...")
     max_length = GPT_CONFIG_124M["context_length"]
+    max_train_tokens = (
+        None if args.max_train_tokens == 0 else args.max_train_tokens
+    )
     train_losses, val_losses, track_tokens_seen, track_steps = train_model_simple(
         model=model,
         optimizer=optimizer,
         device=device,
         n_epochs=args.n_epochs,
         eval_freq=args.eval_freq,
-        eval_iter=1,
+        eval_iter=args.eval_iter,
         output_dir=output_dir,
         save_ckpt_freq=args.save_ckpt_freq,
         tokenizer=tokenizer,
@@ -362,6 +428,8 @@ if __name__ == "__main__":
         stride=args.stride,
         max_chars=args.max_chars,
         warmup_steps=args.warmup_steps,
+        max_train_tokens=max_train_tokens,
+        num_workers=args.num_workers,
     )
 
     if train_losses:
