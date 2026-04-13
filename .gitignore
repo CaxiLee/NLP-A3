@@ -1,0 +1,23 @@
+# 课程提供的大体积数据（勿提交；在服务器上解压后使用）
+wiki_zh_2019/
+wiki_zh_2019.zip
+
+# 提取后的全文（体积大，本地/服务器重新生成）
+wikizh.txt
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+
+# 训练产物（体积大或可复现）
+*.pth
+model_checkpoints/
+out_test/
+out_tiny/
+loss.pdf
+
+# 若希望把分词器一并备份到仓库，可删除下一行
+# wikizh_tokenizer.json
